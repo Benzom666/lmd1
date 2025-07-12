@@ -24,6 +24,7 @@ import {
   AlertTriangle,
   Route,
   Play,
+  Camera,
 } from "lucide-react"
 
 export default function DriverOrderDetailPage() {
@@ -150,6 +151,13 @@ export default function DriverOrderDetailPage() {
             Delivered
           </Badge>
         )
+      case "failed":
+        return (
+          <Badge variant="outline" className="bg-red-50 text-red-700 border-red-200">
+            <AlertTriangle className="mr-1 h-3 w-3" />
+            Failed
+          </Badge>
+        )
       default:
         return <Badge variant="outline">{status.replace("_", " ")}</Badge>
     }
@@ -228,6 +236,12 @@ export default function DriverOrderDetailPage() {
             <MessageSquare className="mr-2 h-4 w-4" />
             Contact
           </Button>
+          {(order.status === "delivered" || order.status === "failed") && (
+            <Button variant="outline" onClick={() => router.push(`/driver/orders/${order.id}/pod-view`)}>
+              <Camera className="mr-2 h-4 w-4" />
+              View {order.status === "delivered" ? "Proof of Delivery" : "Failure Report"}
+            </Button>
+          )}
         </div>
 
         <Tabs defaultValue="details">
@@ -374,7 +388,11 @@ export default function DriverOrderDetailPage() {
                       <Navigation className="mr-2 h-4 w-4" />
                       Open in Google Maps
                     </Button>
-                    <Button variant="outline" className="w-full" onClick={() => router.push("/driver/route-optimizer")}>
+                    <Button
+                      variant="outline"
+                      className="w-full bg-transparent"
+                      onClick={() => router.push("/driver/route-optimizer")}
+                    >
                       <Route className="mr-2 h-4 w-4" />
                       Optimize Route
                     </Button>
@@ -400,7 +418,7 @@ export default function DriverOrderDetailPage() {
                   )}
                   <Button
                     variant="outline"
-                    className="w-full justify-start"
+                    className="w-full justify-start bg-transparent"
                     onClick={() => router.push(`/driver/communication/${order.id}?type=customer`)}
                   >
                     <MessageSquare className="mr-2 h-4 w-4" />
@@ -417,7 +435,7 @@ export default function DriverOrderDetailPage() {
                 <CardContent className="space-y-3">
                   <Button
                     variant="outline"
-                    className="w-full justify-start"
+                    className="w-full justify-start bg-transparent"
                     onClick={() => router.push(`/driver/communication/${order.id}?type=admin`)}
                   >
                     <MessageSquare className="mr-2 h-4 w-4" />
@@ -425,7 +443,7 @@ export default function DriverOrderDetailPage() {
                   </Button>
                   <Button
                     variant="outline"
-                    className="w-full justify-start"
+                    className="w-full justify-start bg-transparent"
                     onClick={() => router.push(`/driver/orders/${order.id}/report-issue`)}
                   >
                     <AlertTriangle className="mr-2 h-4 w-4" />

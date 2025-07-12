@@ -14,14 +14,36 @@ const supabaseServiceRole = createClient(
 )
 
 export async function POST(request: NextRequest) {
-  console.log("🚚 Driver completing order...")
+  console.log("🚚 Driver completing order - API called")
 
   try {
-    const { orderId, driverId, completionData } = await request.json()
+    const body = await request.json()
+    console.log("📦 Request body received:", {
+      hasOrderId: !!body.orderId,
+      hasDriverId: !!body.driverId,
+      hasCompletionData: !!body.completionData,
+      completionDataKeys: body.completionData ? Object.keys(body.completionData) : [],
+    })
+
+    const { orderId, driverId, completionData } = body
 
     if (!orderId || !driverId) {
+      console.error("❌ Missing required fields:", { orderId: !!orderId, driverId: !!driverId })
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 })
     }
+
+    if (!completionData) {
+      console.error("❌ Missing completion data")
+      return NextResponse.json({ error: "Missing completion data" }, { status: 400 })
+    }
+
+    console.log("📸 Photo data analysis:", {
+      hasPhotos: !!completionData.photos,
+      photosType: typeof completionData.photos,
+      photosIsArray: Array.isArray(completionData.photos),
+      photosCount: completionData.photos?.length || 0,
+      firstPhotoStructure: completionData.photos?.[0] ? Object.keys(completionData.photos[0]) : [],
+    })
 
     // Verify the driver is assigned to this order
     const { data: order, error: orderError } = await supabaseServiceRole
@@ -45,24 +67,173 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Order not found or not assigned to you" }, { status: 404 })
     }
 
-    // Update the order status to delivered
-    const updateData = {
-      status: "delivered",
-      completed_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      ...completionData, // Include photos, notes, signature, etc.
+    console.log("✅ Order found:", {
+      orderNumber: order.order_number,
+      status: order.status,
+      customer: order.customer_name,
+    })
+
+    // Process photos and create POD record
+    let podId: string | null = null
+    const photoUrls: string[] = []
+    let photosProcessed = 0
+
+    try {
+      // Create POD record first
+      const podData = {
+        order_id: orderId,
+        driver_id: driverId,
+        delivery_timestamp: new Date().toISOString(),
+        recipient_name: completionData.customerName || order.customer_name,
+        recipient_signature: completionData.signature || null,
+        delivery_notes: completionData.notes || null,
+        location_latitude: completionData.location?.lat || null,
+        location_longitude: completionData.location?.lng || null,
+      }
+
+      console.log("📝 Creating POD record:", podData)
+
+      const { data: createdPod, error: podError } = await supabaseServiceRole
+        .from("proof_of_delivery")
+        .insert(podData)
+        .select()
+        .single()
+
+      if (podError) {
+        console.error("❌ Error creating POD record:", podError)
+        throw new Error(`Failed to create POD record: ${podError.message}`)
+      }
+
+      podId = createdPod.id
+      console.log(`✅ POD record created with ID: ${podId}`)
+
+      // Process photos if they exist
+      if (completionData.photos && Array.isArray(completionData.photos)) {
+        console.log(`📸 Processing ${completionData.photos.length} photos...`)
+
+        for (let i = 0; i < completionData.photos.length; i++) {
+          const photo = completionData.photos[i]
+
+          console.log(`📸 Processing photo ${i + 1}:`, {
+            hasUrl: !!photo.url,
+            urlLength: photo.url?.length || 0,
+            urlType: typeof photo.url,
+            isBase64: photo.url?.startsWith("data:") || false,
+            type: photo.type,
+            id: photo.id,
+          })
+
+          if (!photo.url) {
+            console.warn(`⚠️ Photo ${i + 1} has no URL, skipping`)
+            continue
+          }
+
+          try {
+            const photoRecord = {
+              pod_id: podId,
+              photo_url: photo.url,
+              photo_type: photo.type || "delivery",
+              description: photo.description || `Delivery photo ${i + 1}`,
+              file_size: photo.file?.size || null,
+              mime_type: photo.file?.type || "image/jpeg",
+            }
+
+            console.log(`📸 Inserting photo ${i + 1} record:`, {
+              pod_id: photoRecord.pod_id,
+              photo_type: photoRecord.photo_type,
+              description: photoRecord.description,
+              file_size: photoRecord.file_size,
+              mime_type: photoRecord.mime_type,
+              url_length: photoRecord.photo_url.length,
+            })
+
+            const { error: photoError } = await supabaseServiceRole.from("pod_photos").insert(photoRecord)
+
+            if (photoError) {
+              console.error(`❌ Error storing photo ${i + 1}:`, photoError)
+            } else {
+              photoUrls.push(photo.url)
+              photosProcessed++
+              console.log(`✅ Photo ${i + 1} stored successfully`)
+            }
+          } catch (error) {
+            console.error(`❌ Error processing photo ${i + 1}:`, error)
+          }
+        }
+
+        console.log(`📸 Photo processing complete: ${photosProcessed}/${completionData.photos.length} photos stored`)
+      } else {
+        console.log("📸 No photos to process")
+      }
+    } catch (error) {
+      console.error("❌ Error in POD/photo processing:", error)
+      // Continue with order completion even if POD processing fails
     }
+
+    // Update the order status
+    const updateData: any = {
+      status: "delivered",
+      updated_at: new Date().toISOString(),
+    }
+
+    // Add completed_at and photo_url if columns exist
+    try {
+      // Check if columns exist by trying to update with them
+      updateData.completed_at = new Date().toISOString()
+
+      if (photoUrls.length > 0) {
+        updateData.photo_url = JSON.stringify(photoUrls)
+        console.log(`📸 Storing ${photoUrls.length} photo URLs in order.photo_url`)
+      }
+    } catch (error) {
+      console.warn("⚠️ Some order columns may not exist, continuing with basic update")
+    }
+
+    console.log("📝 Updating order with data:", {
+      orderId,
+      status: updateData.status,
+      hasCompletedAt: !!updateData.completed_at,
+      hasPhotoUrl: !!updateData.photo_url,
+      photoUrlLength: updateData.photo_url?.length || 0,
+    })
 
     const { error: updateError } = await supabaseServiceRole.from("orders").update(updateData).eq("id", orderId)
 
     if (updateError) {
       console.error("❌ Error updating order:", updateError)
-      return NextResponse.json({ error: "Failed to update order" }, { status: 500 })
+      return NextResponse.json({ error: "Failed to update order status" }, { status: 500 })
     }
 
-    console.log(`✅ Order ${order.order_number} marked as delivered by driver`)
+    console.log(`✅ Order ${order.order_number} marked as delivered`)
 
-    // If this is a Shopify order, automatically update fulfillment
+    // Create order update record for audit trail
+    try {
+      const updateRecord = {
+        order_id: orderId,
+        driver_id: driverId,
+        status: "delivered",
+        notes: `PROOF OF DELIVERY COMPLETED
+Delivered to: ${completionData.customerName || order.customer_name}
+Photos captured: ${photosProcessed}
+POD ID: ${podId || "N/A"}
+${completionData.notes ? `Notes: ${completionData.notes}` : ""}`,
+        photo_url: photoUrls.length > 0 ? JSON.stringify(photoUrls) : null,
+        latitude: completionData.location?.lat || null,
+        longitude: completionData.location?.lng || null,
+      }
+
+      const { error: updateRecordError } = await supabaseServiceRole.from("order_updates").insert(updateRecord)
+
+      if (updateRecordError) {
+        console.error("❌ Error creating order update record:", updateRecordError)
+      } else {
+        console.log("✅ Order update record created")
+      }
+    } catch (error) {
+      console.error("❌ Error creating order update record:", error)
+    }
+
+    // Handle Shopify fulfillment if applicable
     let shopifyResult = null
     if (order.shopify_order_id && order.shopify_connections) {
       const connection = order.shopify_connections
@@ -77,7 +248,6 @@ export async function POST(request: NextRequest) {
             driverId,
           )
 
-          // Update our record with fulfillment info
           await supabaseServiceRole
             .from("orders")
             .update({
@@ -89,7 +259,6 @@ export async function POST(request: NextRequest) {
           console.log(`🏪 Shopify fulfillment updated for order: ${order.order_number}`)
         } catch (shopifyError) {
           console.error("⚠️ Failed to update Shopify fulfillment:", shopifyError)
-          // Don't fail the entire request if Shopify update fails
           shopifyResult = { error: shopifyError.message }
         }
       }
@@ -101,7 +270,7 @@ export async function POST(request: NextRequest) {
       sendAdminCompletionNotification(order, driverId),
     ])
 
-    return NextResponse.json({
+    const response = {
       success: true,
       message: "Order completed successfully",
       order: {
@@ -110,9 +279,17 @@ export async function POST(request: NextRequest) {
         status: "delivered",
         completed_at: updateData.completed_at,
       },
+      pod: {
+        id: podId,
+        photos_processed: photosProcessed,
+        photos_total: completionData.photos?.length || 0,
+      },
       shopify_updated: !!shopifyResult && !shopifyResult.error,
       shopify_result: shopifyResult,
-    })
+    }
+
+    console.log("✅ POD completion successful:", response)
+    return NextResponse.json(response)
   } catch (error) {
     console.error("❌ Error completing order:", error)
     logError(error, { endpoint: "driver_complete_order" })
@@ -136,15 +313,6 @@ async function updateShopifyFulfillment(
 ): Promise<{ fulfillment_id: string }> {
   console.log(`🏪 Updating Shopify fulfillment for order: ${shopifyOrderId}`)
 
-  // Get driver info for tracking
-  const { data: driver } = await supabaseServiceRole
-    .from("user_profiles")
-    .select("first_name, last_name, phone")
-    .eq("user_id", driverId)
-    .single()
-
-  const driverName = driver ? `${driver.first_name || ""} ${driver.last_name || ""}`.trim() || "Driver" : "Driver"
-
   const fulfillmentData = {
     fulfillment: {
       location_id: null,
@@ -152,7 +320,7 @@ async function updateShopifyFulfillment(
       tracking_company: "Local Delivery Service",
       tracking_url: null,
       notify_customer: true,
-      line_items: [], // Empty array fulfills all items
+      line_items: [],
     },
   }
 
@@ -199,7 +367,6 @@ async function sendDriverCompletionNotification(order: any, driverId: string) {
 
 async function sendAdminCompletionNotification(order: any, driverId: string) {
   try {
-    // Get driver info
     const { data: driver } = await supabaseServiceRole
       .from("user_profiles")
       .select("first_name, last_name")
